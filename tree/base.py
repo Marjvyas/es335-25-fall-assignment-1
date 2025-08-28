@@ -8,535 +8,567 @@ You will be expected to use this to make trees for:
 """
 from dataclasses import dataclass
 from typing import Literal
-
-import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from tree.utils import *
-
-try:
-    import graphviz
-    import os
-    GRAPHVIZ_AVAILABLE = True
-except ImportError:
-    GRAPHVIZ_AVAILABLE = False
-
-np.random.seed(42)
+import numpy as np
 
 
 @dataclass
-class DecisionTree:
-    criterion: Literal["information_gain", "gini_index"]  # criterion won't be used for regression
-    max_depth: int  # The maximum depth the tree can grow to
+class Node:
+    """
+    A node in the decision tree.
+    """
+    feature: str = None
+    threshold: float = None
+    value: float = None
+    samples: int = 0
+    left: 'Node' = None
+    right: 'Node' = None
+    
+    def is_leaf(self) -> bool:
+        return self.left is None and self.right is None
 
-    def __init__(self, criterion, max_depth=5):
+
+class DecisionTree:
+    """
+    A decision tree classifier/regressor using Information Gain (entropy) for splitting.
+    """
+    
+    def __init__(self, criterion = "information_gain", max_depth: int = 5):
+        """
+        Initialize the decision tree.
+        
+        Parameters:
+        -----------
+        criterion : str
+            The function to measure the quality of a split. Only "information_gain" is implemented.
+            If "gini_index" is passed, the tree will not be built (since it's optional).
+        max_depth : int
+            The maximum depth of the tree.
+        """
         self.criterion = criterion
         self.max_depth = max_depth
-
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> None:
+        self.root = None
+        self.is_classification = None
+        self.X_train = None
+        self.y_train = None
+        
+    def entropy(self, y: pd.Series) -> float:
         """
-        Function to train and construct the decision tree
+        Calculate the entropy for a given set of class labels.
+        
+        Parameters:
+        -----------
+        y : pd.Series
+            The target values
+            
+        Returns:
+        --------
+        float
+            The entropy value
         """
-        # Convert discrete features to one-hot encoding if needed
-        self.original_X = X.copy()
+        if len(y) == 0:
+            return 0.0
         
-        # Check if any column is categorical or non-numeric
-        categorical_cols = []
-        for col in X.columns:
-            if not pd.api.types.is_numeric_dtype(X[col]):
-                categorical_cols.append(col)
-        
-        if categorical_cols:
-            X = one_hot_encoding(X)
-        
-        # Determine if this is a regression or classification problem
-        self.is_regression = check_ifreal(y)
-        
-        # Store feature names after encoding
-        self.feature_names = X.columns.tolist()
-        
-        # Build the tree
-        self.tree = self._build_tree(X, y, depth=0)
+        _, counts = np.unique(y, return_counts=True)
+        probabilities = counts / len(y)
+        return -np.sum(probabilities * np.log2(probabilities + 1e-10))
     
-    def _build_tree(self, X: pd.DataFrame, y: pd.Series, depth: int):
+    def gini_index(self, y: pd.Series) -> float:
         """
-        Recursively build the decision tree with enhanced statistics tracking
-        """
-        n_samples = len(y)
+        Calculate the Gini index for a given set of class labels.
         
-        # Calculate node statistics
-        if self.is_regression:
-            node_value = y.mean()
-            # Calculate MSE for this node
-            mse = np.mean((y - node_value) ** 2) if len(y) > 0 else 0.0
-        else:
-            node_value = y.mode()[0] if len(y) > 0 else 0
-            # Calculate Gini impurity
-            if len(y) == 0:
-                gini = 0.0
-            else:
-                proportions = y.value_counts(normalize=True)
-                gini = 1.0 - sum(p**2 for p in proportions)
-        
-        # Base cases - stopping criteria
-        if depth >= self.max_depth or len(y.unique()) == 1 or len(X.columns) == 0 or n_samples <= 1:
-            if self.is_regression:
-                return {
-                    'type': 'leaf',
-                    'value': node_value,
-                    'samples': n_samples,
-                    'mse': 0.0,  # Pure leaf has 0 MSE
-                    'is_leaf': True
-                }
-            else:
-                return {
-                    'type': 'leaf', 
-                    'value': node_value,
-                    'samples': n_samples,
-                    'gini': 0.0,  # Pure leaf has 0 Gini
-                    'is_leaf': True
-                }
-        
-        # Choose the best criterion based on problem type
-        if self.is_regression:
-            criterion = "mse"
-        else:
-            criterion = self.criterion
-        
-        # Find the best attribute to split on
-        current_features = pd.Series(X.columns)
-        result = opt_split_attribute(X, y, criterion, current_features)
-        
-        if result is None or result[0] is None:
-            if self.is_regression:
-                return {
-                    'type': 'leaf',
-                    'value': node_value,
-                    'samples': n_samples,
-                    'mse': mse,
-                    'is_leaf': True
-                }
-            else:
-                return {
-                    'type': 'leaf',
-                    'value': node_value,
-                    'samples': n_samples,
-                    'gini': gini,
-                    'is_leaf': True
-                }
-        
-        best_attribute, split_value = result
-        
-        # Create a node with statistics
-        if self.is_regression:
-            node = {
-                'attribute': best_attribute,
-                'split_value': split_value,
-                'children': {},
-                'is_leaf': False,
-                'samples': n_samples,
-                'mse': mse,
-                'value': node_value
-            }
-        else:
-            node = {
-                'attribute': best_attribute,
-                'split_value': split_value,
-                'children': {},
-                'is_leaf': False,
-                'samples': n_samples,
-                'gini': gini,
-                'value': node_value
-            }
-        
-        # Split data based on feature type
-        if split_value is not None:
-            # Real-valued feature: binary split
-            X_left, y_left = split_data(X, y, best_attribute, f'<={split_value}')
-            X_right, y_right = split_data(X, y, best_attribute, f'>{split_value}')
+        Parameters:
+        -----------
+        y : pd.Series
+            The target values
             
-            if len(y_left) > 0:
-                X_left_reduced = X_left.drop(columns=[best_attribute])
-                node['children'][f'<={split_value}'] = self._build_tree(X_left_reduced, y_left, depth + 1)
-            else:
-                if self.is_regression:
-                    node['children'][f'<={split_value}'] = {
-                        'type': 'leaf',
-                        'value': node_value,
-                        'samples': 0,
-                        'mse': 0.0,
-                        'is_leaf': True
-                    }
-                else:
-                    node['children'][f'<={split_value}'] = {
-                        'type': 'leaf',
-                        'value': node_value,
-                        'samples': 0,
-                        'gini': 0.0,
-                        'is_leaf': True
-                    }
-            
-            if len(y_right) > 0:
-                X_right_reduced = X_right.drop(columns=[best_attribute])
-                node['children'][f'>{split_value}'] = self._build_tree(X_right_reduced, y_right, depth + 1)
-            else:
-                if self.is_regression:
-                    node['children'][f'>{split_value}'] = {
-                        'type': 'leaf',
-                        'value': node_value,
-                        'samples': 0,
-                        'mse': 0.0,
-                        'is_leaf': True
-                    }
-                else:
-                    node['children'][f'>{split_value}'] = {
-                        'type': 'leaf',
-                        'value': node_value,
-                        'samples': 0,
-                        'gini': 0.0,
-                        'is_leaf': True
-                    }
-        else:
-            # Discrete feature: split for each unique value
-            unique_values = X[best_attribute].unique()
-            
-            for value in unique_values:
-                X_subset, y_subset = split_data(X, y, best_attribute, value)
-                
-                if len(y_subset) == 0:
-                    # If no data points, create leaf with current node's value
-                    if self.is_regression:
-                        node['children'][value] = {
-                            'type': 'leaf',
-                            'value': node_value,
-                            'samples': 0,
-                            'mse': 0.0,
-                            'is_leaf': True
-                        }
-                    else:
-                        node['children'][value] = {
-                            'type': 'leaf',
-                            'value': node_value,
-                            'samples': 0,
-                            'gini': 0.0,
-                            'is_leaf': True
-                        }
-                else:
-                    # Remove the current attribute from further consideration
-                    X_subset_reduced = X_subset.drop(columns=[best_attribute])
-                    node['children'][value] = self._build_tree(X_subset_reduced, y_subset, depth + 1)
-        
-        return node
-
-    def predict(self, X: pd.DataFrame) -> pd.Series:
+        Returns:
+        --------
+        float
+            The Gini index value
         """
-        Funtion to run the decision tree on test inputs
-        """
-        # Apply same preprocessing as in fit
-        categorical_cols = []
-        for col in X.columns:
-            if not pd.api.types.is_numeric_dtype(X[col]):
-                categorical_cols.append(col)
+        if len(y) == 0:
+            return 0.0
         
-        if categorical_cols:
-            X = one_hot_encoding(X)
-        
-        # Make predictions for each row
-        predictions = []
-        for idx in range(len(X)):
-            row = X.iloc[idx]
-            prediction = self._predict_single(row, self.tree)
-            predictions.append(prediction)
-        
-        return pd.Series(predictions)
+        _, counts = np.unique(y, return_counts=True)
+        probabilities = counts / len(y)
+        return 1 - np.sum(probabilities ** 2)
     
-    def _predict_single(self, row, node):
+    def information_gain(self, parent: pd.Series, left_child: pd.Series, right_child: pd.Series) -> float:
         """
-        Predict for a single row - updated to handle enhanced node structure
+        Calculate the information gain from splitting the parent into left and right children.
+        
+        Parameters:
+        -----------
+        parent : pd.Series
+            The parent node's target values
+        left_child : pd.Series
+            The left child's target values
+        right_child : pd.Series
+            The right child's target values
+            
+        Returns:
+        --------
+        float
+            The information gain value
         """
-        # Handle different node formats
-        if not isinstance(node, dict):
-            # Old format - just a value
+        if len(parent) == 0:
+            return 0.0
+        
+        if self.is_classification:
+            parent_entropy = self.entropy(parent)
+            
+            n = len(parent)
+            n_left = len(left_child)
+            n_right = len(right_child)
+            
+            if n_left == 0 or n_right == 0:
+                return 0.0
+            
+            weighted_entropy = (n_left / n) * self.entropy(left_child) + (n_right / n) * self.entropy(right_child)
+            return parent_entropy - weighted_entropy
+        else:
+            # For regression, use variance reduction (MSE reduction)
+            parent_var = np.var(parent) if len(parent) > 0 else 0.0
+            
+            n = len(parent)
+            n_left = len(left_child)
+            n_right = len(right_child)
+            
+            if n_left == 0 or n_right == 0:
+                return 0.0
+            
+            left_var = np.var(left_child) if len(left_child) > 0 else 0.0
+            right_var = np.var(right_child) if len(right_child) > 0 else 0.0
+            
+            weighted_var = (n_left / n) * left_var + (n_right / n) * right_var
+            return parent_var - weighted_var
+    
+    def gini_gain(self, parent: pd.Series, left_child: pd.Series, right_child: pd.Series) -> float:
+        """
+        Calculate the Gini gain from splitting the parent into left and right children.
+        
+        Parameters:
+        -----------
+        parent : pd.Series
+            The parent node's target values
+        left_child : pd.Series
+            The left child's target values
+        right_child : pd.Series
+            The right child's target values
+            
+        Returns:
+        --------
+        float
+            The Gini gain value
+        """
+        if len(parent) == 0:
+            return 0.0
+        
+        if self.is_classification:
+            parent_gini = self.gini_index(parent)
+            
+            n = len(parent)
+            n_left = len(left_child)
+            n_right = len(right_child)
+            
+            if n_left == 0 or n_right == 0:
+                return 0.0
+            
+            weighted_gini = (n_left / n) * self.gini_index(left_child) + (n_right / n) * self.gini_index(right_child)
+            return parent_gini - weighted_gini
+        else:
+            # For regression, use variance reduction (same as information gain)
+            parent_var = np.var(parent) if len(parent) > 0 else 0.0
+            
+            n = len(parent)
+            n_left = len(left_child)
+            n_right = len(right_child)
+            
+            if n_left == 0 or n_right == 0:
+                return 0.0
+            
+            left_var = np.var(left_child) if len(left_child) > 0 else 0.0
+            right_var = np.var(right_child) if len(right_child) > 0 else 0.0
+            
+            weighted_var = (n_left / n) * left_var + (n_right / n) * right_var
+            return parent_var - weighted_var
+    
+    def find_best_split(self, X: pd.DataFrame, y: pd.Series):
+        """
+        Find the best feature and threshold to split on using the specified criterion.
+        
+        Parameters:
+        -----------
+        X : pd.DataFrame
+            Input features
+        y : pd.Series
+            Target values
+            
+        Returns:
+        --------
+        tuple
+            (best_feature, best_threshold, best_left_indices, best_right_indices, best_gain)
+        """
+        best_gain = -1
+        best_feature = None
+        best_threshold = None
+        best_left_indices = None
+        best_right_indices = None
+        
+        for feature in X.columns:
+            feature_values = X[feature]
+            
+            # Handle discrete features
+            if feature_values.dtype == 'object' or feature_values.dtype.name == 'category':
+                unique_values = feature_values.unique()
+                for value in unique_values:
+                    left_indices = feature_values == value
+                    right_indices = ~left_indices
+                    
+                    if np.sum(left_indices) == 0 or np.sum(right_indices) == 0:
+                        continue
+                    
+                    left_y = y[left_indices]
+                    right_y = y[right_indices]
+                    
+                    # Use the appropriate criterion
+                    if self.criterion == "information_gain":
+                        gain = self.information_gain(y, left_y, right_y)
+                    else:  # gini_index
+                        gain = self.gini_gain(y, left_y, right_y)
+                    
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_feature = feature
+                        best_threshold = value
+                        best_left_indices = left_indices
+                        best_right_indices = right_indices
+            
+            # Handle continuous/real features
+            else:
+                sorted_values = np.sort(feature_values.unique())
+                # Use midpoints between consecutive unique values as potential thresholds
+                for i in range(len(sorted_values) - 1):
+                    threshold = (sorted_values[i] + sorted_values[i + 1]) / 2
+                    
+                    left_indices = feature_values <= threshold
+                    right_indices = feature_values > threshold
+                    
+                    if np.sum(left_indices) == 0 or np.sum(right_indices) == 0:
+                        continue
+                    
+                    left_y = y[left_indices]
+                    right_y = y[right_indices]
+                    
+                    # Use the appropriate criterion
+                    if self.criterion == "information_gain":
+                        gain = self.information_gain(y, left_y, right_y)
+                    else:  # gini_index
+                        gain = self.gini_gain(y, left_y, right_y)
+                    
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_feature = feature
+                        best_threshold = threshold
+                        best_left_indices = left_indices
+                        best_right_indices = right_indices
+        
+        return best_feature, best_threshold, best_left_indices, best_right_indices, best_gain
+    
+    def build_tree(self, X: pd.DataFrame, y: pd.Series, depth: int = 0) -> Node:
+        """
+        Recursively build the decision tree.
+        
+        Parameters:
+        -----------
+        X : pd.DataFrame
+            Input features
+        y : pd.Series
+            Target values
+        depth : int
+            Current depth of the tree
+            
+        Returns:
+        --------
+        Node
+            The root node of the built tree
+        """
+        node = Node()
+        node.samples = len(y)
+        
+        # Determine leaf node value
+        if self.is_classification:
+            # Most common class for classification
+            node.value = y.mode().iloc[0] if len(y) > 0 else 0
+        else:
+            # Mean value for regression
+            node.value = np.mean(y) if len(y) > 0 else 0.0
+        
+        # Stopping criteria
+        if (depth >= self.max_depth or 
+            len(y.unique()) == 1 or 
+            len(y) < 2):
             return node
         
-        # Check if it's a leaf node in new format
-        if node.get('is_leaf', False) or node.get('type') == 'leaf':
-            return node.get('value', 0)
+        # Find the best split
+        best_feature, best_threshold, left_indices, right_indices, best_gain = self.find_best_split(X, y)
         
-        # Check if it's an internal node without 'attribute' (old format leaf stored as dict)
-        if 'attribute' not in node:
-            return node.get('value', 0)
+        if best_feature is None or best_gain <= 0:
+            return node
         
-        # It's an internal node
-        attribute = node['attribute']
-        split_value = node.get('split_value', None)
+        # Create the split
+        node.feature = best_feature
+        node.threshold = best_threshold
         
-        # Check if attribute exists in the row
-        if attribute not in row.index:
-            # If attribute doesn't exist, return majority/mean from children
-            child_values = [child for child in node['children'].values() 
-                          if not isinstance(child, dict)]
-            if child_values:
-                if self.is_regression:
-                    return np.mean(child_values)
-                else:
-                    return pd.Series(child_values).mode()[0]
-            else:
-                # If no leaf children, pick first child and traverse
-                first_child = list(node['children'].values())[0]
-                return self._predict_single(row, first_child)
+        # Create child nodes
+        X_left, y_left = X[left_indices], y[left_indices]
+        X_right, y_right = X[right_indices], y[right_indices]
         
-        attribute_value = row[attribute]
+        node.left = self.build_tree(X_left, y_left, depth + 1)
+        node.right = self.build_tree(X_right, y_right, depth + 1)
         
-        if split_value is not None:
-            # Real-valued feature: use binary split
-            if attribute_value <= split_value:
-                key = f'<={split_value}'
-            else:
-                key = f'>{split_value}'
+        return node
+        
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> None:
+        """
+        Build a decision tree from the training set (X, y).
+        
+        Parameters:
+        -----------
+        X : pd.DataFrame
+            The input samples.
+        y : pd.Series
+            The target values.
+        """
             
-            if key in node['children']:
-                return self._predict_single(row, node['children'][key])
-            else:
-                # Fallback
-                if self.is_regression:
-                    return 0.0
-                else:
-                    return 0
+        # Reset indices to ensure alignment
+        X = X.reset_index(drop=True)
+        y = y.reset_index(drop=True)
+        
+        # Store training data for plotting
+        self.X_train = X
+        self.y_train = y
+        
+        # Determine if this is a classification or regression task
+        if (y.dtype == 'object' or 
+            y.dtype.name == 'category' or 
+            (y.dtype in ['int64', 'float64'] and len(y.unique()) <= 10)):
+            self.is_classification = True
         else:
-            # Discrete feature: exact match
-            if attribute_value in node['children']:
-                return self._predict_single(row, node['children'][attribute_value])
+            self.is_classification = False
+        
+        # Build the tree
+        self.root = self.build_tree(X, y)
+        
+    def _predict_single(self, node: Node, sample: pd.Series):
+        """
+        Predict a single sample using the decision tree.
+        
+        Parameters:
+        -----------
+        node : Node
+            Current node in the tree
+        sample : pd.Series
+            Single sample to predict
+            
+        Returns:
+        --------
+        The predicted value
+        """
+        if node.is_leaf():
+            return node.value
+        
+        feature_value = sample[node.feature]
+        
+        # Handle discrete features (exact match)
+        if isinstance(node.threshold, str) or self.X_train[node.feature].dtype == 'object':
+            if feature_value == node.threshold:
+                return self._predict_single(node.left, sample)
             else:
-                # If we haven't seen this value, return majority/mean from children
-                child_values = []
-                for child in node['children'].values():
-                    if isinstance(child, dict):
-                        # Need to traverse further to get leaf values
-                        continue
-                    else:
-                        child_values.append(child)
-                
-                if child_values:
-                    if self.is_regression:
-                        return np.mean(child_values)
-                    else:
-                        return pd.Series(child_values).mode()[0]
-                else:
-                    # Default fallback
-                    if self.is_regression:
-                        return 0.0
-                    else:
-                        return list(node['children'].values())[0]
-
+                return self._predict_single(node.right, sample)
+        
+        # Handle continuous features (threshold comparison)
+        else:
+            if feature_value <= node.threshold:
+                return self._predict_single(node.left, sample)
+            else:
+                return self._predict_single(node.right, sample)
+        
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        """
+        Predict class or regression value for samples in X.
+        
+        Parameters:
+        -----------
+        X : pd.DataFrame
+            The input samples.
+            
+        Returns:
+        --------
+        pd.Series
+            The predicted values.
+        """
+        # Return empty predictions if implementation was skipped
+        if self.root is None:
+            
+            print("Decision tree has not been fitted yet.")
+            # Return default predictions (zeros)
+            return pd.Series([0] * len(X), index=X.index)
+        
+        predictions = []
+        for _, sample in X.iterrows():
+            prediction = self._predict_single(self.root, sample)
+            predictions.append(prediction)
+        
+        return pd.Series(predictions, index=X.index)
+        
+    def _plot_tree_text(self, node: Node, depth: int = 0, prefix: str = "", is_left: bool = True) -> None:
+        """
+        Recursively print the tree structure in a nice format.
+        
+        Parameters:
+        -----------
+        node : Node
+            Current node to plot
+        depth : int
+            Current depth
+        prefix : str
+            Prefix for the current line
+        is_left : bool
+            Whether this is a left child
+        """
+        if node is None:
+            return
+        
+        if node.is_leaf():
+            if self.is_classification:
+                print(f"{prefix}{'├─' if is_left else '└─'} class: {node.value} (samples: {node.samples})")
+            else:
+                print(f"{prefix}{'├─' if is_left else '└─'} value: {node.value:.3f} (samples: {node.samples})")
+        else:
+            # Print the condition
+            if isinstance(node.threshold, str):
+                condition = f"{node.feature} == '{node.threshold}'"
+            else:
+                condition = f"{node.feature} ≤ {node.threshold:.3f}"
+            
+            print(f"{prefix}{'├─' if is_left else '└─'} {condition} (samples: {node.samples})")
+            
+            # Prepare prefix for children
+            child_prefix = prefix + ("│   " if is_left else "    ")
+            
+            # Plot children
+            if node.left:
+                self._plot_tree_text(node.left, depth + 1, child_prefix, True)
+            if node.right:
+                self._plot_tree_text(node.right, depth + 1, child_prefix, False)
+        
     def plot(self) -> None:
         """
         Function to plot the tree
-
+        
         Output Example:
-        ?(X1 > 4)
-            Y: ?(X2 > 7)
-                Y: Class A
-                N: Class B
-            N: Class C
-        Where Y => Yes and N => No
+        ├── X₀ ≤ 6.0
+        │   ├── X₁ ≤ 4.0
+        │   │   ├── class_A
+        │   │   └── class_B
+        │   └── X₁ ≤ 2.0
+        │       ├── class_B
+        │       └── class_A
+        └── class_B
         """
-        def _plot_tree(node, indent="", attribute_value=""):
-            if isinstance(node, dict):
-                # Check if it's a leaf node in new format
-                if node.get('is_leaf', False) or node.get('type') == 'leaf':
-                    # Leaf node
-                    leaf_value = node.get('value', 'Unknown')
-                    if attribute_value:
-                        print(f"{indent}{attribute_value}: {leaf_value}")
-                    else:
-                        print(f"{indent}{leaf_value}")
-                elif 'attribute' in node:
-                    # Internal node
-                    attribute = node['attribute']
-                    if attribute_value:
-                        print(f"{indent}{attribute_value}: ?({attribute})")
-                    else:
-                        print(f"{indent}?({attribute})")
-                    
-                    # Plot children
-                    for value, child in node['children'].items():
-                        _plot_tree(child, indent + "  ", str(value))
-                else:
-                    # Old format leaf node stored as dict
-                    leaf_value = node.get('value', node)
-                    if attribute_value:
-                        print(f"{indent}{attribute_value}: {leaf_value}")
-                    else:
-                        print(f"{indent}{leaf_value}")
-            else:
-                # Old format leaf node
-                if attribute_value:
-                    print(f"{indent}{attribute_value}: {node}")
-                else:
-                    print(f"{indent}{node}")
+            
+        if self.root is None:
+            print("Tree has not been fitted yet.")
+            return
         
-        if hasattr(self, 'tree'):
-            _plot_tree(self.tree)
+        # First create graphical version with auto-generated filename
+        try:
+            import graphviz
+            import os
+            import time
+            
+            # Generate filename based on data types and criterion
+            input_type = "discrete" if any(self.X_train.dtypes == 'object') else "real"
+            output_type = "discrete" if self.is_classification else "real"
+            
+            # Use timestamp to ensure unique filenames for each run
+            timestamp = str(int(time.time() * 1000))[-6:]
+            filename = f"tree_{input_type}_input_{output_type}_output_{self.criterion}_{timestamp}"
+            png_filename = f"{filename}.png"
+            
+            # Create graphviz representation
+            dot = graphviz.Digraph(comment='Decision Tree')
+            dot.attr(rankdir='TB')
+            dot.attr('node', shape='box', style='rounded,filled', fontname='Arial')
+        
+            def add_nodes(node: Node, node_id: str = "0"):
+                if node is None:
+                    return
+                
+                if node.is_leaf():
+                    if self.is_classification:
+                        label = f"Class: {node.value}\\nSamples: {node.samples}"
+                        color = 'lightgreen'
+                    else:
+                        label = f"Value: {node.value:.3f}\\nSamples: {node.samples}"
+                        color = 'lightblue'
+                else:
+                    if isinstance(node.threshold, str):
+                        condition = f"{node.feature} == '{node.threshold}'"
+                    else:
+                        condition = f"{node.feature} ≤ {node.threshold:.3f}"
+                    
+                    label = f"{condition}\\nSamples: {node.samples}"
+                    color = 'lightcoral'
+                
+                dot.node(node_id, label, fillcolor=color)
+                
+                if not node.is_leaf():
+                    left_id = f"{node_id}_L"
+                    right_id = f"{node_id}_R"
+                    
+                    if node.left:
+                        add_nodes(node.left, left_id)
+                        dot.edge(node_id, left_id, label='True', color='green')
+                    
+                    if node.right:
+                        add_nodes(node.right, right_id)
+                        dot.edge(node_id, right_id, label='False', color='red')
+            
+            add_nodes(self.root)
+            
+            # Render to PNG
+            dot.render(filename, format='png', cleanup=True)
+            print(f"Tree visualization saved as: {png_filename}")
+            
+        except ImportError:
+            print("Graphviz not available for image generation.")
+        except Exception as e:
+            print(f"Could not create tree image: {e}")
+        
+        # Always show text representation
+        print("\nDecision Tree Structure:")
+        print("=" * 50)
+        if self.root.is_leaf():
+            if self.is_classification:
+                print(f"Root (Leaf): class {self.root.value} (samples: {self.root.samples})")
+            else:
+                print(f"Root (Leaf): value {self.root.value:.3f} (samples: {self.root.samples})")
         else:
-            print("Tree not fitted yet!")
-
-    def create_graph(self, filename=None, feature_names=None):
-        """
-        Create a graphviz visualization of the decision tree
-        
-        Parameters:
-        filename: str, name for the output file (without extension)
-        feature_names: list, names of the features
-        
-        Returns:
-        graphviz.Source object
-        """
-        if not GRAPHVIZ_AVAILABLE:
-            print("Graphviz not available. Please install: pip install graphviz")
-            return None
-            
-        if not hasattr(self, 'tree'):
-            print("Tree not fitted yet!")
-            return None
-            
-        if feature_names is None:
-            if hasattr(self, 'feature_names_'):
-                feature_names = self.feature_names_
+            if isinstance(self.root.threshold, str):
+                condition = f"{self.root.feature} == '{self.root.threshold}'"
             else:
-                feature_names = [f'feature_{i}' for i in range(len(self.tree.get('children', {})))]
-        
-        # Create DOT format string
-        dot_lines = ['digraph Tree {']
-        dot_lines.append('node [shape=box, style="filled,rounded", color="black", fontname="helvetica"];')
-        dot_lines.append('edge [fontname="helvetica"];')
-        
-        node_counter = [0]  # Use list to allow modification in nested function
-        
-        def _add_node_to_dot(node, parent_id=None, edge_label=""):
-            current_id = node_counter[0]
-            node_counter[0] += 1
+                condition = f"{self.root.feature} ≤ {self.root.threshold:.3f}"
+            print(f"Root: {condition} (samples: {self.root.samples})")
             
-            if isinstance(node, dict):
-                # Check if it's a leaf node
-                if node.get('is_leaf', False) or node.get('type') == 'leaf':
-                    # Leaf node with actual statistics
-                    samples_count = node.get('samples', 0)
-                    leaf_value = node.get('value', 0)
-                    
-                    if self.is_regression:
-                        mse_value = node.get('mse', 0.0)
-                        node_info = f"squared_error = {mse_value:.3f}\\nsamples = {samples_count}\\nvalue = {leaf_value:.1f}"
-                        
-                        # Color based on value range
-                        if leaf_value < 20:
-                            color = "#fff2e6"  # Very light orange
-                        elif leaf_value < 30:
-                            color = "#ffe6cc"  # Light orange
-                        else:
-                            color = "#ffcc99"  # Darker orange
-                    else:
-                        gini_value = node.get('gini', 0.0)
-                        class_value = int(leaf_value)
-                        node_info = f"gini = {gini_value:.3f}\\nsamples = {samples_count}\\nvalue = [{samples_count if class_value else 0}, {samples_count if not class_value else 0}]"
-                        
-                        # Color based on class
-                        if class_value == 0:
-                            color = "#ffe6cc"  # Light orange for class 0
-                        else:
-                            color = "#e6ffe6"  # Light green for class 1
-                    
-                    dot_lines.append(f'{current_id} [label="{node_info}", fillcolor="{color}"];')
-                    
-                else:
-                    # Internal node with actual statistics
-                    attribute = node['attribute']
-                    split_value = node.get('split_value', None)
-                    samples_count = node.get('samples', 0)
-                    node_value = node.get('value', 0)
-                    
-                    if split_value is not None:
-                        # Real-valued split
-                        condition_text = f"{attribute} <= {split_value:.1f}"
-                    else:
-                        # Discrete split
-                        condition_text = f"{attribute}"
-                    
-                    if self.is_regression:
-                        mse_value = node.get('mse', 0.0)
-                        node_info = f"{condition_text}\\nsquared_error = {mse_value:.3f}\\nsamples = {samples_count}\\nvalue = {node_value:.1f}"
-                    else:
-                        gini_value = node.get('gini', 0.0)
-                        node_info = f"{condition_text}\\ngini = {gini_value:.3f}\\nsamples = {samples_count}\\nvalue = [{int(samples_count/2)}, {int(samples_count/2)}]"
-                    
-                    color = "#ffffff"  # White background for internal nodes
-                    dot_lines.append(f'{current_id} [label="{node_info}", fillcolor="{color}"];')
-                    
-                    # Add edges to children
-                    for child_value, child_node in node['children'].items():
-                        child_id = _add_node_to_dot(child_node, current_id, str(child_value))
-                        
-                        # Format edge label
-                        if split_value is not None:
-                            if child_value.startswith('<='):
-                                edge_text = "True"
-                            else:
-                                edge_text = "False"
-                        else:
-                            edge_text = str(child_value)
-                        
-                        dot_lines.append(f'{current_id} -> {child_id} [label="{edge_text}"];')
-                
-            else:
-                # Old format leaf node (fallback)
-                if self.is_regression:
-                    node_info = f"squared_error = 0.0\\nsamples = 1\\nvalue = {float(node):.1f}"
-                    color = "#ffe6cc"
-                else:
-                    node_info = f"gini = 0.0\\nsamples = 1\\nvalue = [{int(node)}]"
-                    color = "#ffe6cc" if node == 0 else "#e6ffe6"
-                
-                dot_lines.append(f'{current_id} [label="{node_info}", fillcolor="{color}"];')
-            
-            return current_id
+            # Plot children with proper formatting
+            if self.root.left:
+                print("│")
+                self._plot_tree_text(self.root.left, 1, "", True)
+            if self.root.right:
+                print("│")
+                self._plot_tree_text(self.root.right, 1, "", False)
         
-        # Build the graph
-        _add_node_to_dot(self.tree)
-        dot_lines.append('}')
-        
-        dot_data = '\n'.join(dot_lines)
-        
-        # Create graphviz object
-        graph = graphviz.Source(dot_data)
-        graph.format = 'pdf'
-        
-        # Save if filename provided
-        if filename:
-            # Create figures directory if it doesn't exist
-            figures_dir = "figures/decision-trees"
-            os.makedirs(figures_dir, exist_ok=True)
-            
-            graph.render(f"{figures_dir}/{filename}", cleanup=True)
-            print(f"Decision tree saved as {figures_dir}/{filename}.pdf")
-        
-        return graph
-
-    def export_graphviz(self, feature_names=None):
-        """
-        Export decision tree in DOT format similar to sklearn's export_graphviz
-        
-        Parameters:
-        feature_names: list, names of the features
-        
-        Returns:
-        str: DOT format string
-        """
-        if not GRAPHVIZ_AVAILABLE:
-            print("Graphviz not available. Please install: pip install graphviz")
-            return None
-            
-        if not hasattr(self, 'tree'):
-            return "Tree not fitted yet!"
-            
-        graph = self.create_graph(feature_names=feature_names)
-        return graph.source if graph else None
+        print("=" * 50)
